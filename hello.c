@@ -50,12 +50,13 @@
  */
 
 // blocks
-#define BLOCK_SIZE 1024
+#define BLOCK_SIZE 4096
 #define MAX_BLOCKS 64
 #define MAX_FILENAME_LENGTH 256
 #define MAX_FILES 56 // num of inodes
 #define MAX_DIRECT_POINTER 13
 #define ROOT 0
+#define DIRENT_SIZE BLOCK_SIZE * sizeof(char) / sizeof(struct st_DIRENT)
 
 
 // static const char *hello_str = "Hello World!\n";
@@ -91,15 +92,15 @@ struct st_DIRENT {
 
 union u_DATABLOCK {
 	char data[BLOCK_SIZE];//
-	struct st_DIRENT dirent[];//
+	struct st_DIRENT dirent[DIRENT_SIZE];//
 } ;
 
 struct _FileSystem {
 	// superblock은 구현 x
-	int inodebitmap[BLOCK_SIZE];
-	int databitmap[BLOCK_SIZE];
+	int inodebitmap[MAX_FILES];
+	int databitmap[MAX_FILES];
 	struct st_INODE inodetable[MAX_FILES];
-	union u_DATABLOCK datablock[MAX_BLOCKS];
+	union u_DATABLOCK datablock[MAX_FILES];
 	int file_count;
 } ;
 struct _FileSystem FS;
@@ -131,14 +132,35 @@ int find_next_inode(const char *name, const struct st_INODE *iblock) {
 
     for (int i = 0; i < MAX_DIRECT_POINTER; i++) {
 		for (int j = 0; j < BLOCK_SIZE; j++) {
-			if (strcmp(iblock->datablock[i]->dirent[j], name) == 0)
+			if (strcmp(iblock->datablock[i]->dirent[j].d_name, name) == 0)
             	return iblock->datablock[i]->dirent[j].d_ino;
         }
     }
     return -1;  // Directory not found
 }
 
+int find_empty_inode() {
+	for (int i = 0; i < MAX_FILES; i++) {
+		if (FS.inodebitmap[i] == 0) {
+			return i;
+		}
+	}
+	return -ENOMEM;
+}
+int find_empty_datablock() {
+	for (int i = 0; i < MAX_FILES; i++) {
+		if (FS.databitmap[i] == 0) {
+			return i;
+		}
+	}
+	return -ENOMEM;
+}
+
+
 int find_inode(const char *path) {
+	// root 인 경우
+	if (path == "/") return ROOT;
+
 	// root 아닌 경우
 	char *temp_path = strdup(path); // string duplication
 	// char *base_name = basename(temp_path); 
@@ -162,6 +184,46 @@ int find_inode(const char *path) {
 	}
 
 	return current_inode;
+}
+
+int find_parent_inode(const char *path) {
+    // root 디렉터리인 경우
+    if (strcmp(path, "/") == 0) {
+        return EPERM;
+    }
+
+    char *temp_path = strdup(path); // 경로 복사
+    int components_count;
+    char **path_components = split_path(temp_path, &components_count);
+
+    int current_inode = ROOT;
+    struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
+
+    // 부모 디렉터리까지 탐색
+    for (int i = 0; i < components_count - 1; i++) {
+        current_inode = find_next_inode(path_components[i], current_inodeblock);
+
+        if (current_inode < 0) {
+            // 오류 처리: 디렉터리가 존재하지 않음
+            for (int j = 0; j < components_count; j++) {
+                free(path_components[j]);
+            }
+            free(path_components);
+            free(temp_path);
+            return -ENOENT;
+        }
+
+        current_inodeblock = &FS.inodetable[current_inode];
+    }
+
+    // 메모리 정리
+    for (int j = 0; j < components_count; j++) {
+        free(path_components[j]);
+    }
+    free(path_components);
+    free(temp_path);
+
+    return current_inode;
 }
 
 static struct options {
@@ -209,7 +271,7 @@ static void *ot_init(struct fuse_conn_info *conn,
 			struct fuse_config *cfg)
 {
 	printf("INIT start \n");
-	memset(FS, 0, sizeof(struct _FileSystem));
+	memset(&FS, 0, sizeof(struct _FileSystem));
 	// for (int i = 0; i < MAX_FILES; i++) {
 	// for (int j = 0; j < BLOCK_SIZE; j++){
 	// 		FS.datablock[i].data[j] = 0;
@@ -247,6 +309,7 @@ static int ot_getattr(const char *path, struct stat *stbuf, struct fuse_file_inf
 
 	// root 아닌 경우
 	// path parsing
+	char *temp_path = strdup(path); // string duplication
 	int components_count;
 	char **path_components = split_path(temp_path, &components_count);
 	
@@ -254,6 +317,7 @@ static int ot_getattr(const char *path, struct stat *stbuf, struct fuse_file_inf
 	int current_inode = find_inode(path);
 	if (current_inode < 0) return -ENOENT;
 
+	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
 	stbuf->st_mode = current_inodeblock->mode; // | S_IFREG
 	stbuf->st_nlink = current_inodeblock->links_count;
 	stbuf->st_size = current_inodeblock->blocks_count * BLOCK_SIZE * sizeof(union u_DATABLOCK);
@@ -290,30 +354,15 @@ static int ot_readdir(const char *path, void *buf, fuse_fill_dir_t filler, \
 	char *temp_path = strdup(path); // string duplication
 	char *base_name = basename(temp_path); 
 
-	int current_inode = ROOT;
-	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
-
-	if (strcmp(path, "/") != 0) {
-		int components_count;
-		char **path_components = split_path(temp_path, &components_count);
-		
-		for (int i = 0; i < components_count; i++) {
-			current_inode = find_directory(path_components[i], current_inodeblock);
-			if (current_inode < 0) {
-				for (int j = 0; j < components_count; j++) free(path_components[j]);
-				free(path_components);
-				free(temp_path);
-				printf("READDIR finish \n");
-				return -ENOENT;
-			}
-			current_inodeblock = &FS.inodetable[current_inode];
-		}
-		for (int i = 0; i < components_count; i++) free(path_components[i]);
-		free(path_components);
+	int current_inode = find_inode(path);
+	if (current_inode < 0) {
+		printf("READDIR FINISH \n");
+		return -ENOENT;
 	}
 	
 	// file list 생성
 	// filler 함수 사용하여 buffer에 파일 이름 추가
+	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
 	filler(buf, ".", NULL, 0, 0);
 	filler(buf, "..", NULL, 0, 0);
 	
@@ -331,39 +380,103 @@ static int ot_readdir(const char *path, void *buf, fuse_fill_dir_t filler, \
 
 static int ot_open(const char *path, struct fuse_file_info *fi)
 {
-	printf("OPEN start \n");
+	printf("OPEN START \n");
 	
+	// check file not found: return -ENOENT
+	int current_inode = find_inode(path);
+	if (current_inode < 0) {
+		printf("OPEN FINISH \n");
+		return -ENOENT;
+	}
+
+	// check permission: EACCES
+	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
+	if ((fi->flags & O_ACCMODE) == O_RDONLY){
+		if ((current_inodeblock->mode & 04) == 04){
+			printf("OPEN FINISH \n");
+			return 0;
+		}
+	}
+	else if ((fi->flags & O_ACCMODE) == O_RDONLY) {
+		if ((current_inodeblock->mode & 02) == 02){
+			printf("OPEN FINISH \n");
+			return 0;
+		}
+	}
 	
-	
-	
-	return 0;
+	else {
+		if ((current_inodeblock->mode & 06) == 06){
+			printf("OPEN FINISH \n");
+			return 0;
+		}
+	}
+	printf("OPEN FINISH \n");
+	return -EACCES;
 }
 
 static int ot_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-	printf("@@@@@@@READ start @@@@@@@\n");
+	printf("READ start \n");
 	size_t len;
 	(void) fi;
 	
-	if (strcmp(path, hello_path) != 0){
-		printf("@@@@@@@READ finish @@@@@@@\n");
-		return -ENOENT;
-	}
-		
+	memset(buf, 0, sizeof(buf));
 
-	len = strlen(hello_str);
+	int current_inode = find_inode(path);
+	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
+	
+	len = current_inodeblock->size;
 	if (offset < len) {
 		if (offset + size > len)
 			size = len - offset;
-		memcpy(buf, hello_str + offset, size);
+		memcpy(buf, current_inodeblock->datablock + offset, size);
 	}
 	else 
 		size = 0;
 
-	printf("@@@@@@@READ finish @@@@@@@\n");
+	printf("READ finish \n");
 	return size;
 }
 
+
+static int ot_mkdir(const char *path, mode_t mode)
+{
+	printf("MKDIR start \n");
+
+	// check parent inode
+	int parent_inode = find_parent_inode(path);
+	if (parent_inode < 0) {
+		printf("MKDIR finish \n");
+		return -ENOENT;
+	}
+	struct st_INODE *parent_inodeblock = &FS.inodetable[parent_inode];
+	
+	// allocate new inode
+	int current_inode = find_empty_inode();
+	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
+	// allocate new directory entry
+	int current_datablock = find_empty_datablock();
+
+	// link parent directory and new directory
+	for (int i = 0; i < MAX_DIRECT_POINTER; i++) {
+		for (int j = 0; j < DIRENT_SIZE; j++) {
+			if (parent_inodeblock->datablock[i]->dirent[j].d_ino == 0){
+				parent_inodeblock->datablock[i]->dirent[j].d_ino = current_inode;
+				char *temp_path = strdup(path); // string duplication
+				char *base_name = basename(temp_path); 
+				strcpy(parent_inodeblock->datablock[i]->dirent[j].d_name, base_name);
+			}
+        }
+    }
+
+	// set metadata
+	current_inodeblock->mode = S_IFDIR;
+	FS.databitmap[current_datablock] = 1;
+	FS.inodebitmap[current_inode] = 1;
+
+	printf("MKDIR finish \n");
+	return 0;
+}
 
 static const struct fuse_operations ot_oper = {
 	.init       = ot_init,
@@ -371,16 +484,14 @@ static const struct fuse_operations ot_oper = {
 	.readdir	= ot_readdir,
 	.open		= ot_open,
 	.read		= ot_read,
+	.mkdir		= ot_mkdir,
 
 	/*
-	.mkdir		= ot_mkdir,
 	.rmdir		= ot_rmdir,
-	
     .create		= ot_create,
-	
-    	.write		= ot_write,
-        .unlink		= ot_unlink,
-        .utimens        = ot_utimens,
+	.write		= ot_write,
+	.unlink		= ot_unlink,
+	.utimens    = ot_utimens,
 	.release	= ot_release,
 	.rename		= ot_rename,	
 	.destroy	= ot_destroy,
