@@ -57,7 +57,7 @@
 #define MAX_DIRECT_POINTER 13
 #define ROOT 0
 #define DIRENT_SIZE BLOCK_SIZE * sizeof(char) / sizeof(struct st_DIRENT)
-
+#define GET_SIZE(X) X.blocks_count * BLOCK_SIZE * sizeof(union u_DATABLOCK);
 
 // static const char *hello_str = "Hello World!\n";
 // static const char *hello_path = "/helloasdf";
@@ -65,7 +65,7 @@
 struct st_INODE {
 	int mode; // file type (IFDIR, IFREG, IFLNK) + rwxrwxrwx
 	// int uid;
-	int size; // how many bites in this file?
+	int size; // how many bytes in this file?
 	// int time;
 	// int ctime;
 	// int mtime;
@@ -103,7 +103,9 @@ struct _FileSystem {
 	union u_DATABLOCK datablock[MAX_FILES];
 	int file_count;
 } ;
-struct _FileSystem FS;
+
+struct _FileSystem FS = {0, };
+
 
 char **split_path(const char *path, int *count) {
     // path = "/mnt/myFS/hello.c"
@@ -159,7 +161,7 @@ int find_empty_datablock() {
 
 int find_inode(const char *path) {
 	// root 인 경우
-	if (path == "/") return ROOT;
+	if (strcmp(path, "/") == 0) return ROOT;
 
 	// root 아닌 경우
 	char *temp_path = strdup(path); // string duplication
@@ -189,7 +191,7 @@ int find_inode(const char *path) {
 int find_parent_inode(const char *path) {
     // root 디렉터리인 경우
     if (strcmp(path, "/") == 0) {
-        return EPERM;
+        return -EPERM;
     }
 
     char *temp_path = strdup(path); // 경로 복사
@@ -271,7 +273,28 @@ static void *ot_init(struct fuse_conn_info *conn,
 			struct fuse_config *cfg)
 {
 	printf("INIT start \n");
+	
 	memset(&FS, 0, sizeof(struct _FileSystem));
+	printf("memset complete \n");
+	
+	FS.inodebitmap[ROOT] = 1;
+	FS.databitmap[0] = 1;
+	printf("bitmap complete \n");
+
+	FS.inodetable[ROOT].datablock[0] = &FS.datablock[0];
+	printf("datablock allocation");
+
+	FS.inodetable[ROOT].datablock[0]->dirent[0].d_ino = 0;
+	strcpy(FS.inodetable[ROOT].datablock[0]->dirent[0].d_name, ".");
+	FS.inodetable[ROOT].datablock[0]->dirent[1].d_ino = 0;
+	strcpy(FS.inodetable[ROOT].datablock[0]->dirent[1].d_name, "..");
+	printf("datablock complete \n");
+	
+	FS.inodetable[ROOT].mode = S_IFDIR;
+	FS.inodetable[ROOT].links_count = 2;
+	FS.inodetable[ROOT].blocks_count = 1;
+	FS.inodetable[ROOT].size = GET_SIZE(FS.inodetable[ROOT]);
+	printf("metadata complete \n");
 	// for (int i = 0; i < MAX_FILES; i++) {
 	// for (int j = 0; j < BLOCK_SIZE; j++){
 	// 		FS.datablock[i].data[j] = 0;
@@ -349,10 +372,10 @@ static int ot_readdir(const char *path, void *buf, fuse_fill_dir_t filler, \
 
 	printf("READDIR start \n");
 
-	memset(buf, 0, sizeof(buf));
+	memset(buf, 0, sizeof(void*));
 
 	char *temp_path = strdup(path); // string duplication
-	char *base_name = basename(temp_path); 
+	// char *base_name = basename(temp_path); 
 
 	int current_inode = find_inode(path);
 	if (current_inode < 0) {
@@ -363,6 +386,10 @@ static int ot_readdir(const char *path, void *buf, fuse_fill_dir_t filler, \
 	// file list 생성
 	// filler 함수 사용하여 buffer에 파일 이름 추가
 	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
+
+	if ((current_inodeblock->mode & S_IFDIR) != S_IFDIR)
+		return -ENOTDIR;
+
 	filler(buf, ".", NULL, 0, 0);
 	filler(buf, "..", NULL, 0, 0);
 	
@@ -420,19 +447,21 @@ static int ot_read(const char *path, char *buf, size_t size, off_t offset, struc
 	size_t len;
 	(void) fi;
 	
-	memset(buf, 0, sizeof(buf));
+	memset(buf, 0, sizeof(char*));
 
 	int current_inode = find_inode(path);
 	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
 	
 	len = current_inodeblock->size;
-	if (offset < len) {
-		if (offset + size > len)
-			size = len - offset;
-		memcpy(buf, current_inodeblock->datablock + offset, size);
-	}
-	else 
-		size = 0;
+	
+	memcpy(buf, current_inodeblock->datablock, size);
+	// if (offset < len) {
+	// 	if (offset + size > len)
+	// 		size = len - offset;
+	// 	memcpy(buf, current_inodeblock->datablock + offset, size);
+	// }
+	// else 
+	// 	size = 0;
 
 	printf("READ finish \n");
 	return size;
@@ -468,6 +497,10 @@ static int ot_mkdir(const char *path, mode_t mode)
 			}
         }
     }
+	// Initialize the new datablock
+	// for (int i = 0; i < MAX_DIRECT_POINTER; i++) {
+	// 	current_inodeblock->datablock[i] = &FS.datablock[current_datablock];
+	// }
 
 	// set metadata
 	current_inodeblock->mode = S_IFDIR;
