@@ -513,7 +513,6 @@ static int ot_read(const char *path, char *buf, size_t size, off_t offset, struc
 	return size;
 }
 
-
 static int ot_mkdir(const char *path, mode_t mode)
 {
 	printf("MKDIR start \n");
@@ -596,6 +595,72 @@ static int ot_mkdir(const char *path, mode_t mode)
 	return 0;
 }
 
+static int ot_rmdir(const char *path)
+{
+	printf("RMDIR start \n");
+	printf("path: %s\n", path);
+
+	// check parent inode
+	int parent_inode = find_parent_inode(path);
+	printf("parent inode: %d\n", parent_inode);
+	if (parent_inode < 0) {
+		printf("RMDIR finish \n");
+		return -ENOENT;
+	}
+	struct st_INODE *parent_inodeblock = &FS.inodetable[parent_inode];
+	
+	// allocate new inode
+	int current_inode = find_inode(path);
+	printf("cur_inode: %d\n", current_inode);
+	if (current_inode < 0) {
+		printf("RMDIR finish \n");
+		return -ENOENT;
+	}
+	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
+
+	// check is directory
+	if ((current_inodeblock->mode & S_IFDIR) != S_IFDIR) {
+		printf("RMDIR finish\n");
+		return -ENOTDIR;
+	}
+
+	// check directory is empty
+	// dirent 전체를 scan.
+	// -> size 혹은 block_count로 개선하면 좋을 것 같음
+	for (int j = 2; j < DIRENT_SIZE; j++){
+		if (current_inodeblock->datablock[0]->dirent[j].d_ino != 0) {
+			printf("RMDIR finish\n");
+			return -EEXIST;
+		}
+	}
+
+	// memset datablock in inode
+	memset(current_inodeblock->datablock[0], 0, sizeof(union u_DATABLOCK));
+	current_inodeblock->datablock[0] = 0;
+	
+	// link new inode in parent datablock
+	for (int j = 2; j < DIRENT_SIZE; j++) {
+		if (parent_inodeblock->datablock[0]->dirent[j].d_ino == current_inode){
+			parent_inodeblock->datablock[0]->dirent[j].d_ino = 0;
+			strcpy(parent_inodeblock->datablock[0]->dirent[j].d_name, "");
+			break;
+		}
+	}
+
+	// set metadata
+	memset(current_inodeblock, 0, sizeof(struct st_INODE));
+
+	// datablock의 pointer를 사용하지 않고 datablock의 index를 사용하도록 코드수정 필요
+	// FS.databitmap[current_datablock] = 1;
+	FS.inodebitmap[current_inode] = 1;
+
+	parent_inodeblock->links_count -= 1;
+	printf("metadata\n");
+
+	printf("RMDIR finish \n");
+	return 0;
+}
+
 static const struct fuse_operations ot_oper = {
 	.init       = ot_init,
 	.getattr	= ot_getattr,
@@ -603,9 +668,9 @@ static const struct fuse_operations ot_oper = {
 	.open		= ot_open,
 	.read		= ot_read,
 	.mkdir		= ot_mkdir,
+	.rmdir		= ot_rmdir,
 
 	/*
-	.rmdir		= ot_rmdir,
     .create		= ot_create,
 	.write		= ot_write,
 	.unlink		= ot_unlink,
