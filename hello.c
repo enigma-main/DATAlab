@@ -49,6 +49,36 @@
  * different values on the command line.
  */
 
+
+// #define DEBUG_MODE
+#ifdef DEBUG_MODE
+#define DEBUG_PRINT(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#else
+#define DEBUG_PRINT(fmt, ...) do {} while (0)
+#endif
+
+#define DEBUG_MODE_READDIR
+#ifdef DEBUG_MODE_READDIR
+#define DEBUG_PRINT_READDIR(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#else
+#define DEBUG_PRINT_READDIR(fmt, ...) do {} while (0)
+#endif
+
+#define DEBUG_MODE_OPEN
+#ifdef DEBUG_MODE_OPEN
+#define DEBUG_PRINT_OPEN(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#else
+#define DEBUG_PRINT_OPEN(fmt, ...) do {} while (0)
+#endif
+
+#define DEBUG_MODE_READ
+#ifdef DEBUG_MODE_READ
+#define DEBUG_PRINT_READ(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#else
+#define DEBUG_PRINT_READ(fmt, ...) do {} while (0)
+#endif
+
+
 // blocks
 #define BLOCK_SIZE 4096
 #define MAX_BLOCKS 64
@@ -66,7 +96,7 @@ struct st_INODE {
 	int mode; // file type (IFDIR, IFREG, IFLNK) + rwxrwxrwx
 	// int uid;
 	int size; // how many bytes in this file?
-	// int time;
+	int time;
 	// int ctime;
 	// int mtime;
 	// int dtime;
@@ -75,7 +105,7 @@ struct st_INODE {
 	int blocks_count; // how many blocks allocated to this file?
 	// int flags;
 	// int osd1;
-	union u_DATABLOCK* datablock[MAX_DIRECT_POINTER]; // disk pointer
+	int datablock[MAX_DIRECT_POINTER]; // disk pointer
 	// int generation
 	// int file_acl;
 	// int dir_acl;
@@ -127,28 +157,10 @@ char **split_path(const char *path, int *count) {
     return components;
 }
 
-int find_next_inode(const char *name, const struct st_INODE *iblock) {
-    // "/mnt/c/" "/mnt/myFS/"
-    // input "myFS", "/mnt/" inode pointer
-    // output "/mnt/myFS/" inode index
-	printf("find_next_inode start\n");
-	for (int j = 0; j < DIRENT_SIZE; j++) {
-		if (strcmp(iblock->datablock[0]->dirent[j].d_name, name) == 0){
-			printf("find_next_inode finish\n");
-			return iblock->datablock[0]->dirent[j].d_ino;
-		}
-	}
-	printf("find_next_inode finish\n");
-    // for (int i = 0; i < MAX_DIRECT_POINTER; i++) {
-	// 	for (int j = 0; j < BLOCK_SIZE; j++) {
-	// 		if (strcmp(iblock->datablock[i]->dirent[j].d_name, name) == 0)
-    //         	return iblock->datablock[i]->dirent[j].d_ino;
-    //     }
-    // }
-    return -1;  // Directory not found
-}
+
 
 int find_empty_inode() {
+	// first vs. last
 	for (int i = 0; i < MAX_FILES; i++) {
 		if (FS.inodebitmap[i] == 0) {
 			return i;
@@ -164,16 +176,37 @@ int find_empty_datablock() {
 	}
 	return -ENOMEM;
 }
-int find_empty_dirent() {
-	for (int i = 0; i < MAX_FILES; i++) {
-		if (FS.inodebitmap[i] == 0) {
-			return i;
+int find_empty_dirent(int inode) {
+	int datablock0 = FS.inodetable[inode].datablock[0];
+	for (int j = 0; j < DIRENT_SIZE; j++) {
+		if (FS.datablock[datablock0].dirent[j].d_ino == 0) {
+			return j;
 		}
 	}
 	return -ENOMEM;
 }
 
-
+int find_next_inode(const char *name, int inode) {
+    // "/mnt/c/" "/mnt/myFS/"
+    // input "myFS", "/mnt/" inode pointer
+    // output "/mnt/myFS/" inode index
+	DEBUG_PRINT("find_next_inode start\n");
+	int datablock0 = FS.inodetable[inode].datablock[0];
+	for (int j = 0; j < DIRENT_SIZE; j++) {
+		if (strcmp(FS.datablock[datablock0].dirent[j].d_name, name) == 0){
+			DEBUG_PRINT("find_next_inode finish\n");
+			return FS.datablock[datablock0].dirent[j].d_ino;
+		}
+	}
+	DEBUG_PRINT("find_next_inode finish\n");
+    // for (int i = 0; i < MAX_DIRECT_POINTER; i++) {
+	// 	for (int j = 0; j < BLOCK_SIZE; j++) {
+	// 		if (strcmp(iblock->datablock[i]->dirent[j].d_name, name) == 0)
+    //         	return iblock->datablock[i]->dirent[j].d_ino;
+    //     }
+    // }
+    return -1;  // Directory not found
+}
 int find_inode(const char *path) {
 	// root 인 경우
 	if (strcmp(path, "/") == 0) return ROOT;
@@ -181,35 +214,28 @@ int find_inode(const char *path) {
 	// root 아닌 경우
 	char *temp_path = strdup(path); // string duplication
 	// char *base_name = basename(temp_path); 
-	
 	// path parsing
 	int components_count;
 	char **path_components = split_path(temp_path, &components_count);
-	
-	// root directory 부터 recursively path 탐색
-	int current_inode = ROOT;
-	printf("find_inode: comp_count: %d, cur_inode: %d\n", components_count, current_inode);
+	DEBUG_PRINT("find_inode: comp_count: %d, cur_inode: %d\n", components_count, current_inode);
 	for (int i = 0; i < components_count; i++){
-		printf("%s, ", path_components[i]);
+		DEBUG_PRINT("%s, ", path_components[i]);
 	}
-	printf("\n");
+	DEBUG_PRINT("\n");
 
-
-	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
+	// root directory 부터 recursively path 탐색
+	int inode = ROOT;
 	for (int i = 0; i < components_count; i++) {
-		current_inode = find_next_inode(path_components[i], current_inodeblock);
-		if (current_inode < 0) {
+		inode = find_next_inode(path_components[i], inode);
+		if (inode < 0) {
 			for (int j = 0; j < components_count; j++) free(path_components[j]);
 			free(path_components);
-			free(temp_path);
-			return -ENOENT;
+			break;
 		}
-		current_inodeblock = &FS.inodetable[current_inode];
 	}
-
-	return current_inode;
+	free(temp_path);
+	return inode;
 }
-
 int find_parent_inode(const char *path) {
     // root 디렉터리인 경우
     if (strcmp(path, "/") == 0) {
@@ -220,22 +246,17 @@ int find_parent_inode(const char *path) {
     int components_count;
     char **path_components = split_path(temp_path, &components_count);
 
-    int current_inode = ROOT;
-    printf("find_parent: comp_count: %d, cur_inode: %d\n", components_count, current_inode);
+    int inode = ROOT;
+    DEBUG_PRINT("find_parent: comp_count: %d, cur_inode: %d\n", components_count, current_inode);
 	for(int i = 0; i < components_count; i++){
-		printf("%s, ", path_components[i]);
+		DEBUG_PRINT("%s, ", path_components[i]);
 	}
-	printf("\n");
+	DEBUG_PRINT("\n");
 	
-	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
-	
-    
-
 	// 부모 디렉터리까지 탐색
     for (int i = 0; i < components_count - 1; i++) {
-        current_inode = find_next_inode(path_components[i], current_inodeblock);
-
-        if (current_inode < 0) {
+        inode = find_next_inode(path_components[i], inode);
+        if (inode < 0) {
             // 오류 처리: 디렉터리가 존재하지 않음
             for (int j = 0; j < components_count; j++) {
                 free(path_components[j]);
@@ -244,21 +265,31 @@ int find_parent_inode(const char *path) {
             free(temp_path);
             return -ENOENT;
         }
-
-        current_inodeblock = &FS.inodetable[current_inode];
     }
 	
     // 메모리 정리
     for (int j = 0; j < components_count; j++) {
         free(path_components[j]);
     }
-	printf("free: path_comp\n");
+	DEBUG_PRINT("free: path_comp\n");
     free(path_components);
-	printf("free: path_comps\n");
+	DEBUG_PRINT("free: path_comps\n");
     free(temp_path);
-	printf("free: temp_path\n");
+	DEBUG_PRINT("free: temp_path\n");
 
-    return current_inode;
+    return inode;
+}
+int find_dirent(int current_inode, int parent_inode) {
+	int current_datablock0 = FS.inodetable[current_inode].datablock[0];
+	int parent_datablock0 = FS.inodetable[parent_inode].datablock[0];
+
+	for (int j = 2; j < DIRENT_SIZE; j++) {
+		if (FS.datablock[parent_datablock0].dirent[j].d_ino == current_inode){
+			return j;
+		}
+	}
+
+	return -ENOENT;
 }
 
 static struct options {
@@ -301,33 +332,34 @@ static void show_help(const char *progname)
 // inode table
 // data region
 
-// init -> *void
 static void *ot_init(struct fuse_conn_info *conn,
 			struct fuse_config *cfg)
 {
-	printf("INIT start \n");
+	DEBUG_PRINT("INIT start \n");
 	
 	memset(&FS, 0, sizeof(struct _FileSystem));
-	printf("memset complete \n");
+	DEBUG_PRINT("memset complete \n");
 	
 	FS.inodebitmap[ROOT] = 1;
 	FS.databitmap[0] = 1;
-	printf("bitmap complete \n");
+	int inode = ROOT;
+	int datablock0 = ROOT;
+	DEBUG_PRINT("bitmap complete \n");
 
-	FS.inodetable[ROOT].datablock[0] = &FS.datablock[0];
-	printf("datablock allocation \n");
+	FS.inodetable[inode].datablock[0] = datablock0;
+	DEBUG_PRINT("datablock allocation \n");
 
-	FS.inodetable[ROOT].datablock[0]->dirent[0].d_ino = 0;
-	strcpy(FS.inodetable[ROOT].datablock[0]->dirent[0].d_name, ".");
-	FS.inodetable[ROOT].datablock[0]->dirent[1].d_ino = 0;
-	strcpy(FS.inodetable[ROOT].datablock[0]->dirent[1].d_name, "..");
-	printf("datablock complete \n");
+	strcpy(FS.datablock[datablock0].dirent[0].d_name, ".");
+	FS.datablock[datablock0].dirent[0].d_ino = 0;
+	strcpy(FS.datablock[datablock0].dirent[1].d_name, "..");
+	FS.datablock[datablock0].dirent[1].d_ino = 0;
+	DEBUG_PRINT("datablock complete \n");
 	
-	FS.inodetable[ROOT].mode = S_IFDIR;
-	FS.inodetable[ROOT].links_count = 2;
-	FS.inodetable[ROOT].blocks_count = 1;
-	FS.inodetable[ROOT].size = GET_SIZE(FS.inodetable[ROOT]);
-	printf("metadata complete \n");
+	FS.inodetable[inode].mode = S_IFDIR | 0777;
+	FS.inodetable[inode].links_count = 2;
+	FS.inodetable[inode].blocks_count = 1;
+	FS.inodetable[inode].size = GET_SIZE(FS.inodetable[ROOT]);
+	DEBUG_PRINT("metadata complete \n");
 	// for (int i = 0; i < MAX_FILES; i++) {
 	// for (int j = 0; j < BLOCK_SIZE; j++){
 	// 		FS.datablock[i].data[j] = 0;
@@ -344,26 +376,24 @@ static void *ot_init(struct fuse_conn_info *conn,
 	// }
 
 	// return fuse_get_context()->private_data;
-	printf("MAX_DIRENT: %ld\n", DIRENT_SIZE);
+	DEBUG_PRINT("MAX_DIRENT: %ld\n", DIRENT_SIZE);
 }
 
-// getattr -> int
 static int ot_getattr(const char *path, struct stat *stbuf, struct fuse_file_info *fi)
 {
 	(void) fi;
-	printf("GETATTR start \n");
-	printf("path: %s\n", path);
+	DEBUG_PRINT("\nGETATTR start \n");
+	DEBUG_PRINT("path: %s\n", path);
 
 	memset(stbuf, 0, sizeof(struct stat));
-	printf("memset finished\n");
-	// path로부터 file 찾기
-	// root 처리
-	if (strcmp(path, "/") == 0) {
-		stbuf->st_mode = S_IFDIR | 0755;
-		stbuf->st_nlink = 2;
-		printf("GETATTR finish \n");
-		return 0;
-	}
+	DEBUG_PRINT("memset finished\n");
+	// root 처리 구분이 굳이 필요할까?
+	// if (strcmp(path, "/") == 0) {
+	// 	stbuf->st_mode = S_IFDIR | 0755;
+	// 	stbuf->st_nlink = 2;
+	// 	DEBUG_PRINT("GETATTR finish \n\n");
+	// 	return 0;
+	// }
 
 	// root 아닌 경우
 	// path parsing
@@ -372,135 +402,180 @@ static int ot_getattr(const char *path, struct stat *stbuf, struct fuse_file_inf
 	char **path_components = split_path(temp_path, &components_count);
 	
 	// root directory 부터 recursively path 탐색
-	int current_inode = find_inode(path);
-	printf("inode: %d\n", current_inode);
-	if (current_inode < 0) {
-		printf("GETATTR finish \n");
+	int inode = find_inode(path);
+	DEBUG_PRINT("inode: %d\n", inode);
+	if (inode < 0) {
+		DEBUG_PRINT("GETATTR finish \n\n");
 		return -ENOENT;
 	}
-
-	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
-	stbuf->st_mode = current_inodeblock->mode; // | S_IFREG
-	stbuf->st_nlink = current_inodeblock->links_count;
-	stbuf->st_size = current_inodeblock->blocks_count * BLOCK_SIZE * sizeof(union u_DATABLOCK);
+	
+	stbuf->st_mode = FS.inodetable[inode].mode; // | S_IFREG
+	stbuf->st_nlink = FS.inodetable[inode].links_count;
+	stbuf->st_size = GET_SIZE(FS.inodetable[inode])
+	stbuf->st_gid = getgid();
+	stbuf->st_uid = getuid();
+	stbuf->st_atime = time(NULL);
+	stbuf->st_mtime = time(NULL);
 	
 	for (int j = 0; j < components_count; j++) free(path_components[j]);
 	free(path_components);
 	free(temp_path);
-	printf("GETATTR finish \n");
+	DEBUG_PRINT("GETATTR finish \n\n");
 	return 0;
-	// for (int i = 0; i < FS.file_count; i++) {
-	// 	if (strcmp(FS.inodetable[i].filename, base_name) == 0) {
-	// 		// stbuf 채우기
-	// 		stbuf->st_mode = __S_IFREG | FS.inodetable[i].permission;
-	// 		stbuf->st_nlink = 1;
-	// 		stbuf->st_size = FS.inodetable[i].block_count * BLOCK_SIZE;
-	// 		free(temp_path);
-	// 		printf("GETATTR finish \n");
-	// 		return 0;
-	// 	}
-	// }
 }
 
-// readdir -> int
 static int ot_readdir(const char *path, void *buf, fuse_fill_dir_t filler, \
 						off_t offset, struct fuse_file_info *fi)
 {
 	(void) offset; // directory 내에 파일이 여러 개 있을 경우, offset 부터 끝까지만 read 할 때 사용. 이 구현에서는 offset 기능 사용하지 않음
 	(void) fi;
-
-	printf("READDIR start \n");
-	printf("path: %s\n", path);
-
 	memset(buf, 0, sizeof(void*));
+	
+	DEBUG_PRINT_READDIR("\nREADDIR start \n");
+	DEBUG_PRINT_READDIR("path: %s\n", path);
 
-	char *temp_path = strdup(path); // string duplication
-	// char *base_name = basename(temp_path); 
-
-	int current_inode = find_inode(path);
-	printf("inode: %d\n", current_inode);
-
-	if (current_inode < 0) {
-		printf("READDIR FINISH \n");
+	int inode = find_inode(path);
+	DEBUG_PRINT_READDIR("inode: %d\n", inode);
+	if (inode < 0) {
+		DEBUG_PRINT_READDIR("READDIR FINISH \n\n");
 		return -ENOENT;
 	}
 	
 	// file list 생성
 	// filler 함수 사용하여 buffer에 파일 이름 추가
-	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
-
-	if ((current_inodeblock->mode & S_IFDIR) != S_IFDIR)
+	if ((FS.inodetable[inode].mode & S_IFDIR) != S_IFDIR){
 		return -ENOTDIR;
+	}
 
 	filler(buf, ".", NULL, 0, 0);
 	filler(buf, "..", NULL, 0, 0);
 	
-	for (int i = 0; i < FS.file_count; i++) {
-		for (int j = 0; j < MAX_BLOCKS; j++) {
-			if (current_inodeblock->datablock[i]->dirent[j].d_ino > 0)
-				filler(buf, current_inodeblock->datablock[i]->dirent[j].d_name, NULL, 0, 0);
+	int i = 0;
+	int datablock0 = FS.inodetable[inode].datablock[0];
+
+	for (int j = 0; j < DIRENT_SIZE; j++) {
+		if (FS.datablock[datablock0].dirent[j].d_ino > 0){
+			filler(buf, FS.datablock[datablock0].dirent[j].d_name, NULL, 0, 0);
+			printf("%s ", FS.datablock[datablock0].dirent[j].d_name);
 		}
 	}
+	printf("\n");
 
-	free(temp_path);
-	printf("READDIR finish \n");
+	DEBUG_PRINT_READDIR("READDIR finish \n\n");
 	return 0;
 }
 
 static int ot_open(const char *path, struct fuse_file_info *fi)
 {
-	printf("OPEN START \n");
-	printf("path: %s\n", path);
+	DEBUG_PRINT_OPEN("\nOPEN start \n");
+	DEBUG_PRINT_OPEN("path: %s\n", path);
 
 	// check file not found: return -ENOENT
-	int current_inode = find_inode(path);
-	printf("inode: %d\n", current_inode);
-	if (current_inode < 0) {
-		printf("OPEN FINISH \n");
+	int inode = find_inode(path);
+	DEBUG_PRINT_OPEN("inode: %d\n", inode);
+	if (inode < 0) {
+		DEBUG_PRINT_OPEN("OPEN finish \n\n");
 		return -ENOENT;
 	}
 
 	// check permission: EACCES
-	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
-	printf("mode: %d\n", current_inodeblock->mode);
+	DEBUG_PRINT_OPEN("mode: %d    fi->flags: %d \n", FS.inodetable[inode].mode, fi->flags);
 	if ((fi->flags & O_ACCMODE) == O_RDONLY){
-		if ((current_inodeblock->mode & 04) == 04){
-			printf("OPEN FINISH \n");
+		if ((FS.inodetable[inode].mode & 04) == 04){
+			DEBUG_PRINT_OPEN("OPEN RDONLY finish \n\n");
 			return 0;
 		}
 	}
-	else if ((fi->flags & O_ACCMODE) == O_RDONLY) {
-		if ((current_inodeblock->mode & 02) == 02){
-			printf("OPEN FINISH \n");
+	else if ((fi->flags & O_ACCMODE) == O_WRONLY) {
+		if ((FS.inodetable[inode].mode & 02) == 02){
+			DEBUG_PRINT_OPEN("OPEN WRONLY finish \n\n");
 			return 0;
 		}
 	}
 	
 	else {
-		if ((current_inodeblock->mode & 06) == 06){
-			printf("OPEN FINISH \n");
+		if ((FS.inodetable[inode].mode & 06) == 06){
+			DEBUG_PRINT_OPEN("OPEN RW finish \n\n");
 			return 0;
 		}
 	}
-	printf("OPEN FINISH \n");
+	DEBUG_PRINT_OPEN("OPEN finish \n\n");
 	return -EACCES;
 }
 
-static int ot_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
+static int ot_read(const char *path, char *buf, size_t size, \
+					off_t off, struct fuse_file_info *fi)
 {
-	printf("READ start \n");
-	printf("path: %s\n", path);
-	size_t len;
+	DEBUG_PRINT_READ("\nREAD start \n");
+	DEBUG_PRINT_READ("path: %s    size: %d\n", path, size);
+	// size_t len;////
 	(void) fi;
 	
 	memset(buf, 0, size);
 
+	int inode = find_inode(path);
+	int datablock0 = FS.inodetable[inode].datablock[0];
+	
+	// if (off < FS.inodetable[inode].size) {
+	// 	if (off + size < FS.inodetable[inode].size) {
+	// 		;
+	// 	}
+	// 	else {
+	// 		size = FS.inodetable[inode].size - off;
+	// 	}
+	// }
+	// else size = 0;
+	
+	buf = FS.datablock[datablock0].data;
+	size = 12;
+
+	// strcpy, memset 으로는 안되는건가?
+	// strcpy(buf, FS.datablock[datablock0].data);
+	printf("Read content: %s   inode[%d] datablock[%d]\n", \
+			FS.datablock[datablock0].data, inode, datablock0);  // Print the content being read
+	printf("Read buf: %s  \n", buf); 
+	printf("size: %d   offset: %d    inodetableSize: %d\n", size, off, FS.inodetable[inode].size);
+	// memcpy(buf, FS.datablock[datablock0].data, size);
+	// memcpy(buf, &FS.datablock[datablock0], size);
+	// 둘중 어느 것이 맞을까?
+
+	DEBUG_PRINT_READ("READ finish \n");
+	return size;
+}
+
+
+static int ot_write(const char *path, const char *mem, size_t size, off_t off,
+		      struct fuse_file_info *fi)
+{
+	// create 이후 write가 호출된다고 가정
+	printf("WRITE start\n");
+	
+	printf("path: %s\n", path);
+	(void) fi;
+	
 	int current_inode = find_inode(path);
-	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
-	
-	len = current_inodeblock->size;
-	
-	memcpy(buf, current_inodeblock->datablock, size);
+	if(current_inode < 0) {
+		printf("WRITE finish with no entry\n");
+		return -ENOENT;
+	}
+	int current_datablock0 = FS.inodetable[current_inode].datablock[0];
+
+	// main: write
+	int block_size = GET_SIZE(FS.inodetable[current_inode]);
+	if (size < block_size) {
+		memcpy(FS.datablock[current_datablock0].data, mem, size);
+		printf("Writing content: %.*s    inode[%d]  datablock[%d] \n", \ 
+			(int)size, mem, current_inode, current_datablock0); 
+	}
+	// else if ((size / block_size) < MAX_DIRECT_POINTER) {
+	// 	for (int i = 0; i < (size / block_size); i++){
+	// 		memcpy(current_inodeblock->datablock[i], mem + (i * current_inodeblock->size), current_inodeblock->size);
+	// 	}
+	// }
+	else {
+		printf("WRITE finish with too large file\n");
+		return -EFBIG;
+	}
 	// if (offset < len) {
 	// 	if (offset + size > len)
 	// 		size = len - offset;
@@ -509,60 +584,219 @@ static int ot_read(const char *path, char *buf, size_t size, off_t offset, struc
 	// else 
 	// 	size = 0;
 
-	printf("READ finish \n");
+	printf("WRTIE finish \n");
 	return size;
 }
 
+
 static int ot_mkdir(const char *path, mode_t mode)
 {
-	printf("MKDIR start \n");
+	DEBUG_PRINT("MKDIR start \n");
+	DEBUG_PRINT("path: %s\n", path);
+
+	// check parent inode
+	int parent_inode = find_parent_inode(path);
+	DEBUG_PRINT("parent inode: %d\n", parent_inode);
+	if (parent_inode < 0) {
+		DEBUG_PRINT("MKDIR finish \n");
+		return -ENOENT;
+	}
+	int parent_datablock0 = FS.inodetable[parent_inode].datablock[0];
+	
+	// allocate new inode
+	int current_inode = find_empty_inode();
+	DEBUG_PRINT("inode: %d\n", current_inode);
+	if (current_inode < 0) {
+		DEBUG_PRINT("MKDIR finish \n");
+		return -ENOMEM;
+	}
+	// allocate new datablock
+	int current_datablock0 = find_empty_datablock();
+	DEBUG_PRINT("datablock: %d\n", current_datablock);
+	if (current_datablock0 < 0) {
+		DEBUG_PRINT("MKDIR finish \n");
+		return -ENOMEM;
+	}
+
+	// link inode and datablock
+	FS.inodetable[current_inode].datablock[0] = current_datablock0;
+	DEBUG_PRINT("cur: inode datablock mapping: inode %d -> datablock %d\n", current_inode, current_datablock);
+	
+	// add ".", ".." to dirent0, dirent1
+	strcpy(FS.datablock[current_datablock0].dirent[0].d_name, ".");
+	FS.datablock[current_datablock0].dirent[0].d_ino = current_inode;
+	strcpy(FS.datablock[current_datablock0].dirent[1].d_name, "..");
+	FS.datablock[current_datablock0].dirent[1].d_ino = parent_inode;
+	DEBUG_PRINT("cur: datablock ., .. add\n");
+
+	// link new inode and parent datablock
+	int new_dirent = find_empty_dirent(parent_inode);
+	if (new_dirent < 0) {
+		DEBUG_PRINT("MKDIR finish\n\n");
+		return new_dirent;
+	}
+	FS.datablock[parent_datablock0].dirent[new_dirent].d_ino = current_inode;
+	char *temp_path = strdup(path); // string duplication
+	char *base_name = basename(temp_path); 
+	strcpy(FS.datablock[parent_datablock0].dirent[new_dirent].d_name, base_name);
+	// DEBUG_PRINT("pinode: %d, dirent[%d].d_ino = %d, name: %s\n", \
+	//  	parent_inode, j, current_inode, base_name);
+	// DEBUG_PRINT("pinode: %d, dirent[%d].d_ino = %d, name: %s\n", \
+	//  	parent_inode, j, parent_inodeblock->datablock[0]->dirent[j].d_ino, \
+	//  	parent_inodeblock->datablock[0]->dirent[j].d_name);
+
+
+	// for (int i = 0; i < MAX_DIRECT_POINTER; i++) {
+	// 	for (int j = 2; j < DIRENT_SIZE; j++) {
+	// 		if (parent_inodeblock->datablock[i]->dirent[j].d_ino == 0){
+	// 			parent_inodeblock->datablock[i]->dirent[j].d_ino = current_inode;
+	// 			char *temp_path = strdup(path); // string duplication
+	// 			char *base_name = basename(temp_path); 
+	// 			strcpy(parent_inodeblock->datablock[i]->dirent[j].d_name, base_name);
+	// 		}
+    //     }
+    // }
+
+	// Initialize the new datablock
+	// for (int i = 0; i < MAX_DIRECT_POINTER; i++) {
+	// 	current_inodeblock->datablock[i] = &FS.datablock[current_datablock];
+	// }
+
+	// set metadata
+	FS.inodetable[current_inode].mode = S_IFDIR | 0777;
+	FS.databitmap[current_datablock0] = 1;
+	FS.inodebitmap[current_inode] = 1;
+
+	FS.inodetable[current_inode].blocks_count = 1;
+	FS.inodetable[current_inode].size = DIRENT_SIZE * 2;
+	FS.inodetable[current_inode].links_count = 2;
+	
+	FS.inodetable[parent_inode].size += DIRENT_SIZE;
+	FS.inodetable[parent_inode].links_count += 1;
+	DEBUG_PRINT("metadata\n");
+
+	DEBUG_PRINT("MKDIR finish \n\n");
+	return 0;
+}
+
+static int ot_rmdir(const char *path)
+{
+	DEBUG_PRINT("\nRMDIR start \n");
+	DEBUG_PRINT("path: %s\n", path);
+
+	// check root
+	if (strcmp(path, "/") == 0){
+		DEBUG_PRINT("RMDIR finish \n");
+		return -EPERM;
+	}
+	// check parent inode
+	int parent_inode = find_parent_inode(path);
+	DEBUG_PRINT("parent inode: %d\n", parent_inode);
+	if (parent_inode < 0) {
+		DEBUG_PRINT("RMDIR finish \n");
+		return -ENOENT;
+	}
+	// allocate new inode
+	int current_inode = find_inode(path);
+	DEBUG_PRINT("cur_inode: %d\n", current_inode);
+	if (current_inode < 0) {
+		DEBUG_PRINT("RMDIR finish \n");
+		return -ENOENT;
+	}
+
+	// check is directory
+	if ((FS.inodetable[current_inode].mode & S_IFDIR) != S_IFDIR) {
+		DEBUG_PRINT("RMDIR finish\n");
+		return -ENOTDIR;
+	}
+
+	// check directory is empty
+	// dirent 전체를 scan.
+	// for (int j = 2; j < DIRENT_SIZE; j++){
+	// 	if (current_inodeblock->datablock[0]->dirent[j].d_ino != 0) {
+	// 		DEBUG_PRINT("RMDIR finish\n\n");
+	// 		return -EEXIST;
+	// 	}
+	// }
+	// -> size 혹은 block_count로 개선하면 좋을 것 같음
+	if (FS.inodetable[current_inode].size > 2 * DIRENT_SIZE) {
+		DEBUG_PRINT("RMDIR finish\n\n");
+		return -EEXIST;
+	}
+
+	// free current_datablock and current_inode
+	int current_datablock0 = FS.inodetable[current_inode].datablock[0];
+	int parent_datablock0 = FS.inodetable[parent_inode].datablock[0];
+	memset(FS.datablock[current_datablock0].data, 0, sizeof(union u_DATABLOCK));
+	FS.inodetable[current_inode].datablock[0] = 0;
+	
+	// free parent_datablock and parent_inode
+	int j = find_dirent(current_inode, parent_inode);
+	FS.datablock[parent_datablock0].dirent[j].d_ino = 0;
+	strcpy(FS.datablock[parent_datablock0].dirent[j].d_name, "");
+
+	// set metadata
+	memset(&FS.inodetable[current_inode], 0, sizeof(struct st_INODE));
+	FS.databitmap[current_datablock0] = 0;
+	FS.inodebitmap[current_inode] = 0;
+
+	FS.inodetable[parent_inode].size -= DIRENT_SIZE;
+	FS.inodetable[parent_inode].links_count -= 1;
+	DEBUG_PRINT("metadata\n");
+
+	DEBUG_PRINT("RMDIR finish \n\n");
+	return 0;
+}
+
+static int ot_create(const char *path, mode_t mode, struct fuse_file_info *fi)
+{
+	printf("\nCREATE start \n");
 	printf("path: %s\n", path);
 
 	// check parent inode
 	int parent_inode = find_parent_inode(path);
 	printf("parent inode: %d\n", parent_inode);
 	if (parent_inode < 0) {
-		printf("MKDIR finish \n");
-		return -ENOENT;
+		printf("CREATE finish \n\n");
+		return parent_inode;
 	}
-	struct st_INODE *parent_inodeblock = &FS.inodetable[parent_inode];
+	int parent_datablock0 = FS.inodetable[parent_inode].datablock[0];
 	
 	// allocate new inode
 	int current_inode = find_empty_inode();
 	printf("inode: %d\n", current_inode);
-	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
-	// allocate new directory entry
-	int current_datablock = find_empty_datablock();
-	printf("datablock: %d\n", current_datablock);
-
-	// allocate datablock in inode
-	current_inodeblock->datablock[0] = &FS.datablock[current_datablock];
-	printf("cur: inode datablock mapping: inode %d -> datablock %d\n", current_inode, current_datablock);
-	
-	// add ., .. in current datablock
-	strcpy(current_inodeblock->datablock[0]->dirent[0].d_name, ".");
-	current_inodeblock->datablock[0]->dirent[0].d_ino = current_inode;
-	strcpy(current_inodeblock->datablock[0]->dirent[1].d_name, "..");
-	current_inodeblock->datablock[0]->dirent[1].d_ino = parent_inode;
-	printf("cur: datablock ., .. add\n");
-
-	// link new inode in parent datablock
-	int flag = false;
-	for (int j = 2; j < DIRENT_SIZE; j++) {
-		if (parent_inodeblock->datablock[0]->dirent[j].d_ino == 0){
-			flag = true;
-			parent_inodeblock->datablock[0]->dirent[j].d_ino = current_inode;
-			char *temp_path = strdup(path); // string duplication
-			char *base_name = basename(temp_path); 
-			strcpy(parent_inodeblock->datablock[0]->dirent[j].d_name, base_name);
-			printf("pinode: %d, dirent[%d].d_ino = %d, name: %s\n", parent_inode, j, current_inode, base_name);
-			printf("pinode: %d, dirent[%d].d_ino = %d, name: %s\n", parent_inode, j, parent_inodeblock->datablock[0]->dirent[j].d_ino, parent_inodeblock->datablock[0]->dirent[j].d_name);
-			break;
-		}
+	if (current_inode < 0) {
+		printf("CREATE finish \n\n");
+		return current_inode;
 	}
-	if (flag) printf("parent: link cur\n");
-	else printf("link failed!!!!!\n");
+	// allocate new directory entry
+	int current_datablock0 = find_empty_datablock();
+	printf("datablock: %d\n", current_datablock0);
+	if (current_datablock0 < 0) {
+		printf("CREATE finish \n\n");
+		return current_datablock0;
+	}
+	int j = find_empty_dirent(parent_inode);
+	if (j < 0) {
+		printf("CREATE finish \n\n");
+		return j;
+	}
+	
+	// link inode and datablock
+	FS.inodetable[current_inode].datablock[0] = current_datablock0;
+	printf("cur: inode datablock mapping: inode %d -> datablock %d\n", current_inode, current_datablock0);
 
+	// link new inode and parent datablock
+	FS.datablock[parent_datablock0].dirent[j].d_ino = current_inode;
+	char *temp_path = strdup(path); // string duplication
+	char *base_name = basename(temp_path); 
+	strcpy(FS.datablock[parent_datablock0].dirent[j].d_name, base_name);
+	
+	// **** test ****
+	strcpy(FS.datablock[current_datablock0].data, "Hello World!\0");
+	printf("after strcpy: %s   inode[%d] datablock[%d] \n", FS.datablock[current_datablock0].data, current_inode, current_datablock0);
+	FS.inodetable[current_inode].size = strlen("Hello World!\0");
+	printf("size: %d\n", FS.inodetable[current_inode].size);
 	// for (int i = 0; i < MAX_DIRECT_POINTER; i++) {
 	// 	for (int j = 2; j < DIRENT_SIZE; j++) {
 	// 		if (parent_inodeblock->datablock[i]->dirent[j].d_ino == 0){
@@ -581,83 +815,152 @@ static int ot_mkdir(const char *path, mode_t mode)
 	// }
 
 	// set metadata
-	current_inodeblock->mode = S_IFDIR;
-	FS.databitmap[current_datablock] = 1;
+	FS.databitmap[current_datablock0] = 1;
 	FS.inodebitmap[current_inode] = 1;
 
-	current_inodeblock->blocks_count = 1;
-	current_inodeblock->size = GET_SIZE((*current_inodeblock));
-	current_inodeblock->links_count = 2;
-	parent_inodeblock->links_count += 1;
+	FS.inodetable[current_inode].mode = S_IFREG | 0777;
+	FS.inodetable[current_inode].blocks_count = 1;
+	FS.inodetable[current_inode].size = 0;
+	FS.inodetable[current_inode].links_count = 1;
+
+	FS.inodetable[parent_inode].size += DIRENT_SIZE;
 	printf("metadata\n");
 
-	printf("MKDIR finish \n");
+	printf("CREATE finish \n\n");
 	return 0;
 }
 
-static int ot_rmdir(const char *path)
+static int ot_unlink(const char *path)
 {
-	printf("RMDIR start \n");
+	printf("UNLINK start \n");
 	printf("path: %s\n", path);
 
 	// check parent inode
 	int parent_inode = find_parent_inode(path);
 	printf("parent inode: %d\n", parent_inode);
 	if (parent_inode < 0) {
-		printf("RMDIR finish \n");
+		printf("UNLINK finish \n");
 		return -ENOENT;
 	}
-	struct st_INODE *parent_inodeblock = &FS.inodetable[parent_inode];
-	
+	int parent_datablock0 = FS.inodetable[parent_inode].datablock[0];
 	// allocate new inode
 	int current_inode = find_inode(path);
 	printf("cur_inode: %d\n", current_inode);
 	if (current_inode < 0) {
-		printf("RMDIR finish \n");
+		printf("UNLINK finish \n");
 		return -ENOENT;
 	}
-	struct st_INODE *current_inodeblock = &FS.inodetable[current_inode];
-
-	// check is directory
-	if ((current_inodeblock->mode & S_IFDIR) != S_IFDIR) {
-		printf("RMDIR finish\n");
-		return -ENOTDIR;
+	int current_datablock0 = FS.inodetable[current_inode].datablock[0];
+	// check is regular file
+	if ((FS.inodetable[current_inode].mode & S_IFDIR) == S_IFDIR) {
+		printf("UNLINK finish\n");
+		return -EISDIR;
 	}
 
-	// check directory is empty
-	// dirent 전체를 scan.
-	// -> size 혹은 block_count로 개선하면 좋을 것 같음
+	// check link exist .. 필요할까?
+	if (FS.inodetable[current_inode].links_count < 1) {
+		printf("UNLINK finish\n");
+		return -ENOENT;
+	}
+
+	// main: unlink 
+	char *temp_path = strdup(path); // string duplication
+	char *base_name = basename(temp_path); 
 	for (int j = 2; j < DIRENT_SIZE; j++){
-		if (current_inodeblock->datablock[0]->dirent[j].d_ino != 0) {
-			printf("RMDIR finish\n");
+		if (strcmp(FS.datablock[current_datablock0].dirent[j].d_name, base_name) == 0) { // find_dirent는 d_ino로 비교. unlink는 d_name으로 비교 필요
+			memset(&FS.datablock[current_datablock0].dirent[j], 0, sizeof(struct st_DIRENT));
+			FS.inodetable[current_inode].links_count -= 1;
+			printf("unlink: parent\n");
 			return -EEXIST;
 		}
 	}
 
-	// memset datablock in inode
-	memset(current_inodeblock->datablock[0], 0, sizeof(union u_DATABLOCK));
-	current_inodeblock->datablock[0] = 0;
-	
-	// link new inode in parent datablock
-	for (int j = 2; j < DIRENT_SIZE; j++) {
-		if (parent_inodeblock->datablock[0]->dirent[j].d_ino == current_inode){
-			parent_inodeblock->datablock[0]->dirent[j].d_ino = 0;
-			strcpy(parent_inodeblock->datablock[0]->dirent[j].d_name, "");
-			break;
+
+	// sub: if no link count
+	if (FS.inodetable[current_inode].links_count < 1) {
+		// free datablock
+		memset(&FS.datablock[current_datablock0], 0, sizeof(union u_DATABLOCK));
+		FS.inodetable[current_inode].datablock[0] = 0;
+		// datablock의 pointer를 사용하지 않고 datablock의 index를 사용하도록 코드수정 필요
+		// FS.databitmap[current_datablock] = 0;
+
+		// unlink parent datablock
+		for (int j = 2; j < DIRENT_SIZE; j++) {
+			if (FS.datablock[parent_datablock0].dirent[j].d_ino == current_inode){
+				FS.datablock[parent_datablock0].dirent[j].d_ino = 0;
+				strcpy(FS.datablock[parent_datablock0].dirent[j].d_name, "");
+				break;
+			}
 		}
+		
+		// set metadata
+		// free inode
+		memset(&FS.inodetable[current_inode], 0, sizeof(struct st_INODE));
+		
+		// free bitmap
+		FS.inodebitmap[current_inode] = 0;
+		FS.databitmap[current_datablock0] = 0;
+		printf("metadata\n");	
 	}
+	
+	printf("UNLINK finish \n");
+	return 0;
+}
 
-	// set metadata
-	memset(current_inodeblock, 0, sizeof(struct st_INODE));
+static int ot_utimens(const char *path, const struct timespec tv[2],
+			 struct fuse_file_info *fi)
+{
+	printf("UTIMENS start \n");
+	printf("path: %s\n", path);
 
-	// datablock의 pointer를 사용하지 않고 datablock의 index를 사용하도록 코드수정 필요
-	// FS.databitmap[current_datablock] = 1;
-	FS.inodebitmap[current_inode] = 1;
+	// check inode
+	int inode = find_inode(path);
+	printf("cur_inode: %d\n", inode);
+	if (inode < 0) {
+		printf("UNLINK finish \n");
+		return -ENOENT;
+	}
+	FS.inodetable[inode].time = time(NULL);
 
-	parent_inodeblock->links_count -= 1;
-	printf("metadata\n");
+	printf("UTIMENS finish \n");
+	return 0;
+}
 
-	printf("RMDIR finish \n");
+static int ot_release(const char *path, struct fuse_file_info *fi)
+{
+	return 0;
+}
+
+// 경로 이동 기능 미구현
+static int ot_rename(const char *source, const char *dest, unsigned int flags)
+{
+	printf("RENAME start \n");
+	printf("source: %s  dest: %s\n", source, dest);
+
+	// check parent inode
+	int parent_inode = find_parent_inode(source);
+	printf("parent inode: %d\n", parent_inode);
+	if (parent_inode < 0) {
+		printf("RENAME finish \n\n");
+		return -ENOENT;
+	}
+	int parent_datablock0 = FS.inodetable[parent_inode].datablock[0];
+	
+	// check inode
+	int inode = find_inode(source);
+	printf("inode: %d\n", inode);
+	if (inode < 0) {
+		printf("RENAME finish \n\n");
+		return -ENOENT;
+	}
+	int datablock0 = FS.inodetable[inode].datablock[0];
+	int parent_dirent = find_dirent(inode, parent_inode);
+	
+	char *temp_path = strdup(dest);
+	char *base_name = basename(temp_path); 
+	strcpy(FS.datablock[parent_datablock0].dirent[parent_dirent].d_name, base_name);
+
+	printf("RENAME finish \n");
 	return 0;
 }
 
@@ -669,15 +972,14 @@ static const struct fuse_operations ot_oper = {
 	.read		= ot_read,
 	.mkdir		= ot_mkdir,
 	.rmdir		= ot_rmdir,
-
-	/*
-    .create		= ot_create,
+    .create		= ot_create, // option w,r,x 가능하지만 S_IFDIR S_IFREG 구분
 	.write		= ot_write,
 	.unlink		= ot_unlink,
 	.utimens    = ot_utimens,
 	.release	= ot_release,
-	.rename		= ot_rename,	
-	.destroy	= ot_destroy,
+	.rename		= ot_rename,
+	/*
+	.destroy	= ot_destroy, // 구현 x
 	*/
 };
 
