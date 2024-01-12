@@ -85,9 +85,11 @@
 #define MAX_FILENAME_LENGTH 256
 #define MAX_FILES 56 // num of inodes
 #define MAX_DIRECT_POINTER 13
-#define ROOT 0
+#define ROOT 2
 #define DIRENT_SIZE BLOCK_SIZE * sizeof(char) / sizeof(struct st_DIRENT)
 #define GET_SIZE(X) X.blocks_count * BLOCK_SIZE * sizeof(union u_DATABLOCK);
+
+#define NULL_NODE -1
 
 // static const char *hello_str = "Hello World!\n";
 // static const char *hello_path = "/helloasdf";
@@ -161,7 +163,7 @@ char **split_path(const char *path, int *count) {
 
 int find_empty_inode() {
 	// first vs. last
-	for (int i = 0; i < MAX_FILES; i++) {
+	for (int i = ROOT; i < MAX_FILES; i++) {
 		if (FS.inodebitmap[i] == 0) {
 			return i;
 		}
@@ -169,7 +171,7 @@ int find_empty_inode() {
 	return -ENOMEM;
 }
 int find_empty_datablock() {
-	for (int i = 0; i < MAX_FILES; i++) {
+	for (int i = ROOT; i < MAX_FILES; i++) {
 		if (FS.databitmap[i] == 0) {
 			return i;
 		}
@@ -217,7 +219,7 @@ int find_inode(const char *path) {
 	// path parsing
 	int components_count;
 	char **path_components = split_path(temp_path, &components_count);
-	DEBUG_PRINT("find_inode: comp_count: %d, cur_inode: %d\n", components_count, current_inode);
+	DEBUG_PRINT("find_inode: comp_count: %d\n", components_count);
 	for (int i = 0; i < components_count; i++){
 		DEBUG_PRINT("%s, ", path_components[i]);
 	}
@@ -228,18 +230,20 @@ int find_inode(const char *path) {
 	for (int i = 0; i < components_count; i++) {
 		inode = find_next_inode(path_components[i], inode);
 		if (inode < 0) {
-			for (int j = 0; j < components_count; j++) free(path_components[j]);
-			free(path_components);
 			break;
 		}
 	}
+	for (int j = 0; j < components_count; j++) free(path_components[j]);
+	free(path_components);
 	free(temp_path);
 	return inode;
 }
+
 int find_parent_inode(const char *path) {
     // root 디렉터리인 경우
     if (strcmp(path, "/") == 0) {
-        return -EPERM;
+        // return -EPERM;
+		return ROOT;
     }
 
     char *temp_path = strdup(path); // 경로 복사
@@ -247,7 +251,7 @@ int find_parent_inode(const char *path) {
     char **path_components = split_path(temp_path, &components_count);
 
     int inode = ROOT;
-    DEBUG_PRINT("find_parent: comp_count: %d, cur_inode: %d\n", components_count, current_inode);
+    DEBUG_PRINT("find_parent: comp_count: %d\n", components_count);
 	for(int i = 0; i < components_count; i++){
 		DEBUG_PRINT("%s, ", path_components[i]);
 	}
@@ -279,11 +283,11 @@ int find_parent_inode(const char *path) {
 
     return inode;
 }
-int find_dirent(int current_inode, int parent_inode) {
-	int current_datablock0 = FS.inodetable[current_inode].datablock[0];
+
+int find_dirent_ino(int current_inode, int parent_inode) {
 	int parent_datablock0 = FS.inodetable[parent_inode].datablock[0];
 
-	for (int j = 2; j < DIRENT_SIZE; j++) {
+	for (int j = 0; j < DIRENT_SIZE; j++) {
 		if (FS.datablock[parent_datablock0].dirent[j].d_ino == current_inode){
 			return j;
 		}
@@ -291,6 +295,19 @@ int find_dirent(int current_inode, int parent_inode) {
 
 	return -ENOENT;
 }
+
+int find_dirent_name(char *current_name, int parent_inode) {
+	int parent_datablock0 = FS.inodetable[parent_inode].datablock[0];
+
+	for (int j = 0; j < DIRENT_SIZE; j++) {
+		if (strcmp(FS.datablock[parent_datablock0].dirent[j].d_name, current_name) == 0){
+			return j;
+		}
+	}
+
+	return -ENOENT;
+}
+
 
 static struct options {
 	const char *filename;
@@ -446,9 +463,6 @@ static int ot_readdir(const char *path, void *buf, fuse_fill_dir_t filler, \
 	if ((FS.inodetable[inode].mode & S_IFDIR) != S_IFDIR){
 		return -ENOTDIR;
 	}
-
-	filler(buf, ".", NULL, 0, 0);
-	filler(buf, "..", NULL, 0, 0);
 	
 	int i = 0;
 	int datablock0 = FS.inodetable[inode].datablock[0];
@@ -731,7 +745,7 @@ static int ot_rmdir(const char *path)
 	FS.inodetable[current_inode].datablock[0] = 0;
 	
 	// free parent_datablock and parent_inode
-	int j = find_dirent(current_inode, parent_inode);
+	int j = find_dirent_ino(current_inode, parent_inode);
 	FS.datablock[parent_datablock0].dirent[j].d_ino = 0;
 	strcpy(FS.datablock[parent_datablock0].dirent[j].d_name, "");
 
@@ -839,7 +853,7 @@ static int ot_unlink(const char *path)
 	int parent_inode = find_parent_inode(path);
 	printf("parent inode: %d\n", parent_inode);
 	if (parent_inode < 0) {
-		printf("UNLINK finish \n");
+		printf("UNLINK failed.. \n");
 		return -ENOENT;
 	}
 	int parent_datablock0 = FS.inodetable[parent_inode].datablock[0];
@@ -847,60 +861,58 @@ static int ot_unlink(const char *path)
 	int current_inode = find_inode(path);
 	printf("cur_inode: %d\n", current_inode);
 	if (current_inode < 0) {
-		printf("UNLINK finish \n");
+		printf("UNLINK failed.. \n");
 		return -ENOENT;
 	}
 	int current_datablock0 = FS.inodetable[current_inode].datablock[0];
 	// check is regular file
 	if ((FS.inodetable[current_inode].mode & S_IFDIR) == S_IFDIR) {
-		printf("UNLINK finish\n");
+		printf("UNLINK failed.. \n");
 		return -EISDIR;
 	}
 
 	// check link exist .. 필요할까?
 	if (FS.inodetable[current_inode].links_count < 1) {
-		printf("UNLINK finish\n");
+		printf("UNLINK failed.. \n");
 		return -ENOENT;
 	}
 
-	// main: unlink 
 	char *temp_path = strdup(path); // string duplication
 	char *base_name = basename(temp_path); 
-	for (int j = 2; j < DIRENT_SIZE; j++){
-		if (strcmp(FS.datablock[current_datablock0].dirent[j].d_name, base_name) == 0) { // find_dirent는 d_ino로 비교. unlink는 d_name으로 비교 필요
-			memset(&FS.datablock[current_datablock0].dirent[j], 0, sizeof(struct st_DIRENT));
-			FS.inodetable[current_inode].links_count -= 1;
-			printf("unlink: parent\n");
-			return -EEXIST;
-		}
+	int j = find_dirent_name(base_name, parent_inode);
+	if (j < 0) {
+		printf("UNLINK failed.. \n");
+		return -ENOENT;
 	}
 
 
-	// sub: if no link count
-	if (FS.inodetable[current_inode].links_count < 1) {
+	// main: unlink 
+	FS.inodetable[current_inode].links_count -= 1;
+	memset(&FS.datablock[current_datablock0].dirent[j], 0, sizeof(struct st_DIRENT));
+	printf("unlink: parent\n");
+	
+	// sub: if no link
+	if (FS.inodetable[current_inode].links_count <= 0) {
+		// unlink parent datablock
+		// 파일시스템이 무결하면 필요 없는 기능. 이미 link가 없으니까.
+		// for (int j = 2; j < DIRENT_SIZE; j++) {
+		// 	if (FS.datablock[parent_datablock0].dirent[j].d_ino == current_inode){
+		// 		FS.datablock[parent_datablock0].dirent[j].d_ino = 0;
+		// 		strcpy(FS.datablock[parent_datablock0].dirent[j].d_name, "");
+		// 		break;
+		// 	}
+		// }
+		
 		// free datablock
 		memset(&FS.datablock[current_datablock0], 0, sizeof(union u_DATABLOCK));
-		FS.inodetable[current_inode].datablock[0] = 0;
-		// datablock의 pointer를 사용하지 않고 datablock의 index를 사용하도록 코드수정 필요
-		// FS.databitmap[current_datablock] = 0;
-
-		// unlink parent datablock
-		for (int j = 2; j < DIRENT_SIZE; j++) {
-			if (FS.datablock[parent_datablock0].dirent[j].d_ino == current_inode){
-				FS.datablock[parent_datablock0].dirent[j].d_ino = 0;
-				strcpy(FS.datablock[parent_datablock0].dirent[j].d_name, "");
-				break;
-			}
-		}
-		
-		// set metadata
+		printf("unlink: free datablock (datablock: %s)\n", FS.datablock[current_datablock0].data);
 		// free inode
 		memset(&FS.inodetable[current_inode], 0, sizeof(struct st_INODE));
-		
+		printf("unlink: free inode (datablock0: %d)\n", FS.inodetable[current_inode].datablock[0]);
 		// free bitmap
 		FS.inodebitmap[current_inode] = 0;
 		FS.databitmap[current_datablock0] = 0;
-		printf("metadata\n");	
+		printf("unlink: free bitmap (bitmaps: %d %d)\n", FS.inodebitmap[current_inode], FS.databitmap[current_datablock0]);	
 	}
 	
 	printf("UNLINK finish \n");
@@ -954,11 +966,12 @@ static int ot_rename(const char *source, const char *dest, unsigned int flags)
 		return -ENOENT;
 	}
 	int datablock0 = FS.inodetable[inode].datablock[0];
-	int parent_dirent = find_dirent(inode, parent_inode);
-	
+	int parent_dirent = find_dirent_ino(inode, parent_inode);
+	printf("before: %s\n", FS.datablock[parent_datablock0].dirent[parent_dirent].d_name);
 	char *temp_path = strdup(dest);
 	char *base_name = basename(temp_path); 
 	strcpy(FS.datablock[parent_datablock0].dirent[parent_dirent].d_name, base_name);
+	printf("after: %s\n", FS.datablock[parent_datablock0].dirent[parent_dirent].d_name);
 
 	printf("RENAME finish \n");
 	return 0;
