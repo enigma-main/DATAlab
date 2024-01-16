@@ -92,7 +92,7 @@
 #define DEBUG_PRINT_WRITE(fmt, ...) do {} while (0)
 #endif
 
-// #define DEBUG_MODE_MKDIR
+#define DEBUG_MODE_MKDIR
 #ifdef DEBUG_MODE_MKDIR
 #define DEBUG_PRINT_MKDIR(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
 #else
@@ -106,7 +106,7 @@
 #define DEBUG_PRINT_RMDIR(fmt, ...) do {} while (0)
 #endif
 
-// #define DEBUG_MODE_CREATE
+#define DEBUG_MODE_CREATE
 #ifdef DEBUG_MODE_CREATE
 #define DEBUG_PRINT_CREATE(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
 #else
@@ -151,18 +151,18 @@
 
 // blocks
 #define BLOCK_SIZE 4096
-#define MAX_BLOCKS 64
+#define MAX_BLOCKS 4096
 #define MAX_FILENAME_LENGTH 256
-#define MAX_FILES 56 // num of inodes
+#define MAX_FILES 4000 // num of inodes
 #define MAX_DIRECT_POINTER 13
 #define ROOT_INODE 2
 #define ROOT_DATABLOCK 0
-#define DIRENT_SIZE BLOCK_SIZE * sizeof(char) / sizeof(struct st_DIRENT)
-#define GET_SIZE(X) X.blocks_count * sizeof(union u_DATABLOCK)
+#define DIRENT_SIZE (BLOCK_SIZE * sizeof(char) / sizeof(struct st_DIRENT))
+#define GET_SIZE(X) (X.blocks_count * sizeof(union u_DATABLOCK))
 
 #define NULL_INODE 0 // init all dirent.d_ino = NULL_NODE without . and ..
 
-#define CEIL(x, y) (x - 1) / y + 1
+#define CEIL(x, y) ((x - 1) / y + 1)
 // static const char *hello_str = "Hello World!\n";
 // static const char *hello_path = "/hello";
 
@@ -255,14 +255,24 @@ int find_empty_datablocks(int n, int* arr) {
 		if (FS.databitmap[i] == 0) {
 			arr[j] = i;
 			j++;
-			if (j == n) return 0;
+			printf("%d ", j);
+			if (j == n) {
+				printf("\n");
+				return 0;
+			}
 		}
 	}
 	return -ENOMEM;
 }
 int find_empty_dirent(int inode) {
-	for (int i = 0; i < FS.inodetable[inode].blocks_count; i++){
-		int db = FS.inodetable[inode].datablock[i];
+	int db = FS.inodetable[inode].datablock[0];
+	for (int j = 2; j < DIRENT_SIZE; j++) {
+		if (FS.datablock[db].dirent[j].d_ino == NULL_INODE) {
+			return (0 * DIRENT_SIZE) + j;
+		}
+	}
+	for (int i = 1; i < FS.inodetable[inode].blocks_count; i++){
+		db = FS.inodetable[inode].datablock[i];
 		for (int j = 0; j < DIRENT_SIZE; j++) {
 			if (FS.datablock[db].dirent[j].d_ino == NULL_INODE) {
 				return (i * DIRENT_SIZE) + j;
@@ -271,7 +281,8 @@ int find_empty_dirent(int inode) {
 	}
 
 	// 전체 파일 수가 MAX_FILES를 초과하면 return -ENOMEM 필요
-
+	
+	// directory의 datablock을 확장할 수 있는 경우
 	if (check_blocks_count(inode)) {
 		int db = find_empty_datablock();
 		if (db < 0) return -ENOMEM;
@@ -704,20 +715,24 @@ static int ot_write(const char *path, const char *mem, size_t size, off_t off,
 	
 	// if overwrite ...
 	// 부족한 datablock 만큼 추가 할당 필요
-	int total_blocks = CEIL(BLOCK_SIZE * MAX_DIRECT_POINTER, size);
+	int total_blocks = CEIL(size, BLOCK_SIZE);
 	int cur_blocks = FS.inodetable[inode].blocks_count;
 	int need_blocks = total_blocks - cur_blocks;
-	
-	int new_blocks[MAX_DIRECT_POINTER] = {0,};
-	if (find_empty_datablocks(need_blocks, new_blocks) < 0) {
-		DEBUG_PRINT_WRITE("WRITE failed: -ENOMEM\n");
-		return -ENOMEM;
-	}
+	printf("*** %d %d %d *** \n", total_blocks, cur_blocks, need_blocks);
 
-	for (int i = 0; i < need_blocks; i++) {
-		FS.databitmap[new_blocks[i]] = 1;
-		FS.inodetable[inode].datablock[cur_blocks + i] = new_blocks[i];
+	if (need_blocks) {
+		int new_blocks[MAX_DIRECT_POINTER] = {0,};
+		if (find_empty_datablocks(need_blocks, new_blocks) < 0) {
+			DEBUG_PRINT_WRITE("WRITE failed: -ENOMEM\n");
+			return -ENOMEM;
+		}
+
+		for (int i = 0; i < need_blocks; i++) {
+			FS.databitmap[new_blocks[i]] = 1;
+			FS.inodetable[inode].datablock[cur_blocks + i] = new_blocks[i];
+		}
 	}
+	
 	
 	off_t o = 0;
 	size_t s = size - o;
@@ -765,13 +780,15 @@ static int ot_mkdir(const char *path, mode_t mode)
 		return -ENOTDIR;
 	}
 	int j = find_empty_dirent(parent_inode);
+	printf("**** %d ****\n", j);
 	if (j < 0) {
 		DEBUG_PRINT_MKDIR("MKDIR failed: -ENOENT\n\n");
 		return -ENOENT;
 	}
-	int i = j / DIRENT_SIZE;
+	int i = j / (DIRENT_SIZE);
 	int parent_datablock_i = FS.inodetable[parent_inode].datablock[i];
-	j = j % DIRENT_SIZE;
+	j = j % (DIRENT_SIZE);
+	printf("**** %d %d ****\n", j, DIRENT_SIZE);
 	
 	// allocate new inode
 	int current_inode = find_empty_inode();
@@ -804,11 +821,11 @@ static int ot_mkdir(const char *path, mode_t mode)
 	char *temp_path = strdup(path); // string duplication
 	char *base_name = basename(temp_path); 
 	strcpy(FS.datablock[parent_datablock_i].dirent[j].d_name, base_name);
-	// DEBUG_PRINT_MKDIR("pinode: %d, dirent[%d].d_ino = %d, name: %s\n", \
-	//  	parent_inode, j, current_inode, base_name);
-	// DEBUG_PRINT_MKDIR("pinode: %d, dirent[%d].d_ino = %d, name: %s\n", \
-	//  	parent_inode, j, parent_inodeblock->datablock[0]->dirent[j].d_ino, \
-	//  	parent_inodeblock->datablock[0]->dirent[j].d_name);
+	DEBUG_PRINT_MKDIR("pinode: %d, dirent[%d].d_ino = %d, name: %s\n", 
+	 	parent_inode, j, current_inode, base_name);
+	DEBUG_PRINT_MKDIR("pinode: %d, dirent[%d].d_ino = %d, name: %s\n", 
+	 	parent_inode, j, FS.datablock[parent_datablock_i].dirent[j].d_ino, 
+	 	FS.datablock[parent_datablock_i].dirent[j].d_name);
 
 
 	// for (int i = 0; i < MAX_DIRECT_POINTER; i++) {
