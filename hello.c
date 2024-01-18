@@ -151,10 +151,12 @@
 
 // blocks
 #define BLOCK_SIZE 4096
+#define MAX_FILES 64 // num of inodes
 #define MAX_BLOCKS 64
 #define MAX_FILENAME_LENGTH 256
-#define MAX_FILES 64 // num of inodes
-#define MAX_DIRECT_POINTER 13
+#define MAX_DIRECT_POINTER 11
+#define INDIRECT_IDX 11
+#define DOUBLE_INDIRECT_IDX 12
 #define ROOT_INODE 2
 #define ROOT_DATABLOCK 0
 #define DIRENT_SIZE (BLOCK_SIZE * sizeof(char) / sizeof(struct st_DIRENT))
@@ -197,14 +199,20 @@ struct st_DIRENT {
 union u_DATABLOCK {
 	char data[BLOCK_SIZE]; // 
 	struct st_DIRENT dirent[DIRENT_SIZE]; // 
+	int pdb[(4096 * sizeof(char)) / sizeof(int)];
+} ;
+
+struct st_SUPER {
+	int super_size;
 } ;
 
 struct _FileSystem {
 	// superblock은 구현 x
+	struct st_SUPER;
 	int inodebitmap[MAX_FILES];
 	int databitmap[MAX_FILES];
 	struct st_INODE inodetable[MAX_FILES];
-	union u_DATABLOCK datablock[MAX_FILES];
+	union u_DATABLOCK datablock[MAX_BLOCKS];
 	int file_count;
 } ;
 
@@ -241,8 +249,16 @@ int check_blocks_count(int inode) {
 }
 int check_size(size_t size) {
 	// <가 맞을까? <=가 맞을까?
-	if (size <= BLOCK_SIZE * MAX_DIRECT_POINTER) {
-		return true;
+	int blocks = CEIL(size, BLOCK_SIZE);
+
+	if (blocks < MAX_DIRECT_POINTER) {
+		return blocks;
+	}
+	if (blocks < 1024 + MAX_DIRECT_POINTER) {
+		return INDIRECT_IDX
+	}
+	if (size < 1024 * 1024 + 1024 + MAX_DIRECT_POINTER) {
+		return DOUBLE_INDIRECT_IDX;
 	}
 	else {
 		return false;
@@ -259,7 +275,7 @@ int find_empty_inode() {
 	return -ENOMEM;
 }
 int find_empty_datablock() {
-	for (int i = ROOT_DATABLOCK; i < MAX_FILES; i++) {
+	for (int i = ROOT_DATABLOCK; i < MAX_BLOCKS; i++) {
 		if (FS.databitmap[i] == 0) {
 			return i;
 		}
@@ -269,7 +285,7 @@ int find_empty_datablock() {
 int find_empty_datablocks(int n, int* arr) {
 	// arr size = MAX_DIRECT_POINTER = 13
 	int j = 0;
-	for (int i = ROOT_DATABLOCK; i < MAX_FILES; i++) {
+	for (int i = ROOT_DATABLOCK; i < MAX_BLOCKS; i++) {
 		if (FS.databitmap[i] == 0) {
 			arr[j] = i;
 			j++;
@@ -705,7 +721,8 @@ static int ot_write(const char *path, const char *mem, size_t size, off_t off,
 		return -ENOENT;
 	}
 
-	if (!check_size(size)) {
+	int total_blocks = check_size(size);
+	if (total_blocks == false) {
 		DEBUG_PRINT_WRITE("WRITE failed: -EFBIG\n");
 		return -EFBIG;
 	}
@@ -716,7 +733,7 @@ static int ot_write(const char *path, const char *mem, size_t size, off_t off,
 	
 	// if overwrite ...
 	// 부족한 datablock 만큼 추가 할당 필요
-	int total_blocks = CEIL(size, BLOCK_SIZE);
+	// int total_blocks = CEIL(size, BLOCK_SIZE);
 	int cur_blocks = FS.inodetable[inode].blocks_count;
 	int need_blocks = total_blocks - cur_blocks;
 	printf("*** %d %d %d ***\n", total_blocks, cur_blocks, need_blocks);
